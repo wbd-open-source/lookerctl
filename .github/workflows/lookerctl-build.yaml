@@ -1,0 +1,125 @@
+name: Python Build & Changelog Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: "Python version for build"
+        required: false
+        type: string
+        default: "3.13"
+      environment:
+        description: "Environment to build for"
+        required: false
+        type: string
+        default: prod
+      src-path:
+        description: "Source directory path for Python package"
+        required: false
+        type: string
+        default: "."
+      publish_to_pypi:
+        description: "Whether to publish the built distribution to PyPI"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  pull-requests: write
+  contents: write
+  actions: write
+
+jobs:
+  python-build:
+    name: Python Build & Publish
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: ${{ inputs.python-version || '3.13' }}
+      ENVIRONMENT: ${{ inputs.environment || 'prod' }}
+      SRC_PATH: ${{ inputs.src-path || '.' }}
+      PUBLISH_TO_PYPI: ${{ inputs.publish_to_pypi != null && inputs.publish_to_pypi || true }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        working-directory: ${{ env.SRC_PATH }}
+
+      - name: Build Python Package
+        run: python -m build
+        working-directory: ${{ env.SRC_PATH }}
+
+      - name: Pytest code quality checks
+        run: python -m pytest
+        working-directory: ${{ github.workspace }}/tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Get GitHub Version Number
+        id: version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          append_to_pre_release_tag: dev
+          tag_prefix: v
+          release_branches: main
+          custom_release_rules: perf:major,feat:minor,fix:patch
+
+      - name: Format tag
+        run: |
+          NEW_TAG=${{ steps.version.outputs.new_tag }}
+          CLEAN_TAG="${NEW_TAG%dev}"
+          echo "CLEAN_TAG=$CLEAN_TAG" >> $GITHUB_ENV
+
+      - name: Create a GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.CLEAN_TAG }}
+          name: ${{ env.CLEAN_TAG }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generateReleaseNotes: true
+          makeLatest: true
+
+      - name: Update ENV with Version Tag for Python Build/Package
+        run: |
+          echo "BUILD_VERSION_TAG=${{ steps.version.outputs.new_version }}" >> $GITHUB_ENV
+          echo "Release_type=${{ steps.version.outputs.release_type }}" >> $GITHUB_ENV
+
+      - name: Upload dist for PyPI publish job
+        if: ${{ env.PUBLISH_TO_PYPI == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-dists
+          path: ${{ env.SRC_PATH }}/dist/
+
+  pypi-publish:
+    name: Publish to PyPI
+    if: ${{ inputs.publish_to_pypi }}
+    needs: python-build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: pypi-dists
+          path: dist/
+
+      - name: Publish distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
